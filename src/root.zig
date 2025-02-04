@@ -39,50 +39,28 @@ pub inline fn minimumVectorLength(comptime T: type) ?comptime_int {
 
 // SIMD CHUNK PROCESSOR
 
-fn splitRetT(comptime RetT: type) struct { ?type, type } {
-    const ret_type_info = @typeInfo(RetT);
-
-    const has_error = ret_type_info == .error_union;
-
-    return .{
-        if (has_error) ret_type_info.error_union.error_set else null,
-        if (has_error) ret_type_info.error_union.payload else RetT,
-    };
-}
-
-fn RealRetT(comptime RetT: type) type {
-    const split = splitRetT(RetT);
-    return (split[0] orelse return void)!void;
-}
-
 pub fn Processor(
-    comptime ItemT: type,
-    comptime ArgsT: type,
-    comptime RetT: type,
-    comptime init: splitRetT(RetT)[1],
-    comptime scalar_fn: fn (ItemT, ArgsT, *splitRetT(RetT)[1]) callconv(.@"inline") RealRetT(RetT),
-    comptime simd_fn: fn (comptime type, anytype, ArgsT, *splitRetT(RetT)[1]) callconv(.@"inline") RealRetT(RetT),
+    // zig fmt: off
+    comptime ItemT: type, comptime ArgsT: type,
+    comptime ErrorT: type, comptime StateT: type, comptime init_state: StateT,
+    comptime scalar_fn: fn (ItemT, ArgsT, *StateT) callconv(.@"inline") ErrorT!void,
+    comptime simd_fn: fn (comptime type, anytype, ArgsT, *StateT) callconv(.@"inline") ErrorT!void,
+    // zig fmt: on
 ) type {
-    const split_ret_t = splitRetT(RetT);
-    const has_error = split_ret_t[0] != null;
-
     // use suggested vector length instead of largest possible
     const vec_len = std.simd.suggestVectorLength(ItemT) orelse 0;
 
     return struct {
-        pub inline fn process(slice: []const ItemT, args: ArgsT) RetT {
-            var out: split_ret_t[1] = init;
-            var res: RealRetT(RetT) = undefined;
+        pub inline fn process(slice: []const ItemT, args: ArgsT) ErrorT!StateT {
+            var state: StateT = init_state;
             var items = slice;
 
             // no simd support
             if (comptime vec_len == 0) {
-                for (items) |elem| {
-                    res = scalar_fn(elem, args, &out);
-                    if (has_error) try res;
-                }
+                for (items) |item|
+                    try scalar_fn(item, args, &state);
 
-                return out;
+                return state;
             }
 
             // handle largest vec length first
@@ -95,8 +73,7 @@ pub fn Processor(
 
                 for (0..processable) |_| {
                     const vec: T = items[0..vec_len].*;
-                    res = simd_fn(T, vec, args, &out);
-                    if (has_error) try res;
+                    try simd_fn(T, vec, args, &state);
 
                     items.ptr += vec_len;
                 }
@@ -115,8 +92,7 @@ pub fn Processor(
                     const T = @Vector(vlen, u8);
 
                     const vec: T = items[0..vlen].*;
-                    res = simd_fn(T, vec, args, &out);
-                    if (has_error) try res;
+                    try simd_fn(T, vec, args, &state);
 
                     items.len -= vlen;
                     items.ptr += vlen;
@@ -129,9 +105,8 @@ pub fn Processor(
 
             // we'll only have a single item left to process at this point
 
-            res = scalar_fn(items[0], args, &out);
-            if (has_error) try res;
-            return out;
+            try scalar_fn(items[0], args, &state);
+            return state;
         }
     };
 }
